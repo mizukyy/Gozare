@@ -1,4 +1,15 @@
 //all///////////////////////////////
+#include <ESP32Servo.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+
+////赤外線センサー動作確認用
+int ir = 16;
+
+int ir_val = 0;
+////////////////////////////////////
 
 ///////////////////マイク関係//////////
 int mk = A10;
@@ -82,6 +93,14 @@ void setup() {
   
 }
 
+
+//赤外線センサー読み取り関数
+int ir_read() {
+  ir_val = 0;
+  ir_val = digitalRead(ir);
+  //Serial.println(ir_val);
+  return ir_val;
+}
 
 //マイクセンサー読み取り関数
 float mk_read() {
@@ -203,6 +222,12 @@ void loop() {
 
     
   };
+
+  ir_val = ir_read();
+  if(ir_val == 1){
+    Func_Servo();
+  }
+  
   
 
 }
