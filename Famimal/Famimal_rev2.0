@@ -1,0 +1,1168 @@
+/*//////////////////////////////
+ * Title: Famimal main code
+ * Date : 2022.01.28 (Original)
+//////////////////////////////*/
+ 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_task_wdt.h"
+#include "Arduino.h"
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>w
+#include <ESP32Servo.h>
+#include <Adafruit_NeoPixel.h>
+
+/*///// Flag Setting ////////
+ * flag No.
+ * 1: 加速度センサY軸が上を向く
+ * 2: 赤外線センサが1を出力
+ * 3: -
+ * 4: -
+ * 5: -
+ * (必要に応じて追加)*/
+ int flag[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+/*/////////////////////////*/
+
+/*///// TaskHandle Setting ////////
+ * SensingPhase :　検知フェーズ　
+ * Task1        :　Flag1が1なら実行（LEDを点灯）
+ * Task2        :　Flag2が1なら実行（ゼルダの音をスピーカーで出力）
+ *(必要に応じて追加)*/
+ xTaskHandle xSensingPhase;
+ xTaskHandle xBLE;
+ xTaskHandle xTask1;
+ xTaskHandle xTask2;
+ xTaskHandle xTask3;
+ xTaskHandle xTask4;
+ xTaskHandle xTask5;
+ xTaskHandle xTask6;
+// xTaskHandle xTask7;
+// xTaskHandle xTask8;
+// xTaskHandle xTask9;
+// xTaskHandle xTask0;
+/*//////////////////////////////*/
+
+/*///// Parameter setting ////////
+/* LED */
+#define LED_PIN       22 // ピン番号
+#define NUMPIXELS      1 // LEDを繋げている個数
+// RGBの並びにする
+Adafruit_NeoPixel pixels = Adafruit_NeoPixel(NUMPIXELS, LED_PIN, NEO_RGB + NEO_KHZ800);
+int delayval = 500;
+int rgb_ini[]= {50, 50, 50}; // 初期LED（白）
+int rgb_R[]= {50, 0, 0}; // LED（赤）
+int rgb_G[]= {0, 50, 0}; // LED（緑）
+int rgb_B[]= {0, 0, 50}; // LED（青）
+int rgb_P[]= {248, 171, 166}; // LED（ピンク）
+int rgb_O[]= {255, 153, 0}; // LED(オレンジ)
+int rgb_Pe[]= {153, 0, 255}; // LED(紫)
+int rgb_off[]= {0, 0, 0}; // LED OFF
+
+/* Speaker */
+#define BUZZER_PIN 17 // スピーカーの出力ピン
+#define BEAT 125      //　1つの音を鳴らす間隔
+
+/* ACC sensor */
+#define ACCX_Pin A0 // X軸の読み取りピン
+#define ACCY_Pin A3 // Y軸の読み取りピン
+#define ACCZ_Pin A6 // Z軸の読み取りピン
+long x = 0;
+long y = 0;
+long z = 0;
+float x_vol = 0;
+float y_vol = 0;
+float z_vol = 0;
+float x_acc = 0;
+float y_acc = 0;
+float z_acc = 0;
+float offset_vol = 1650; //入力電圧3.3Vの時
+float ms2 = 9.80665;
+
+/* Infra-red sensor */
+int ir = 16; // 赤外線センサ値の入力ピン
+int ir_val = 0;
+int k = 0;
+
+/* Microphone */
+int mk = A12; // マイク入力ピン
+float mk_val = 0;
+float mk_val_1 =0;
+float mk_val_2 =0;
+float mk_threshold = 2.11;
+
+/* ServoMoter */
+Servo servo1; // create four servo objects 
+Servo servo2; // create four servo objects 
+Servo servo3; // create four servo objects 
+Servo servo4; // create four servo objects 
+Servo servo5; // create four servo objects 
+int servo1Pin = 13; //Servo1 ピン
+int servo2Pin = 12; //Servo2 ピン
+int servo3Pin = 14; //Servo3 ピン
+int servo4Pin = 27; //Servo4 ピン
+int servo5Pin = 26; //Servo5 ピン
+// Published values for SG90 servos; adjust if needed
+int minUs = 500;
+int maxUs = 2400;
+int pos = 10;      // position in degrees
+
+/* BLE */
+BLEServer* pServer = NULL;
+BLECharacteristic* pTxCharacteristic = NULL;
+bool deviceConnected = false;
+bool oldDeviceConnected = false;
+uint32_t value = 0;
+int n = 0;
+
+boolean bleDataIsReceived;
+std::string storedValue;
+byte *data1;
+byte bytebuf;
+portMUX_TYPE storeDataMux = portMUX_INITIALIZER_UNLOCKED;
+
+#define SERVICE_UUID        "00002220-0000-1000-8000-00805F9B34FB"
+#define CHARACTERISTIC_UUID_TX "00002221-0000-1000-8000-00805F9B34FB"
+#define CHARACTERISTIC_UUID_RX "00002222-0000-1000-8000-00805F9B34FB"
+
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      deviceConnected = true;
+    };
+
+    void onDisconnect(BLEServer* pServer) {
+      deviceConnected = false;
+    }
+};
+
+class MyCallbacks: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {  //受けとり部分
+      
+       std::string rxValue = pCharacteristic->getValue();  
+       data1 = pCharacteristic->getData();
+
+      if (data1 > 0) {
+        portENTER_CRITICAL_ISR(&storeDataMux);
+        storedValue = rxValue;
+        bleDataIsReceived = true;
+        portEXIT_CRITICAL_ISR(&storeDataMux);
+      }
+    }
+};
+/*//////////////////////////////*/
+
+/*///////// SETUP //////////////*/
+void setup() {
+  // initialize serial communication at 115200 bits per second:
+  Serial.begin(115200); 
+  // Serial Init Wait
+  delay(50); 
+
+/* BLE SETUP */
+  bleDataIsReceived = false;
+  // Create the BLE Device
+  BLEDevice::init("MyESP32");
+  // Create the BLE Server
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+  // Create the BLE Service
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+  // Create a BLE Characteristic
+  pTxCharacteristic = pService->createCharacteristic(
+                    CHARACTERISTIC_UUID_TX,
+                    BLECharacteristic::PROPERTY_NOTIFY
+                  );
+                      
+  pTxCharacteristic->addDescriptor(new BLE2902());
+
+  BLECharacteristic * pRxCharacteristic = pService->createCharacteristic(
+                       CHARACTERISTIC_UUID_RX,
+                      BLECharacteristic::PROPERTY_WRITE
+                    );
+
+  pRxCharacteristic->setCallbacks(new MyCallbacks());
+  // Start the service
+  pService->start();
+
+  // Start advertising
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(false);
+  pAdvertising->setMinPreferred(0x0);  // set value to 0x00 to not advertise this parameter
+  BLEDevice::startAdvertising();
+  Serial.println("Waiting a client connection to notify...");
+
+/* LED SETUP */
+
+ 
+/* Speaker SETUP*/
+  ledcSetup(2, 12000, 8);  // PWMで利用するチャネルを設定(チャネル, 基本PWMの周波数、デューティ比を表すビット数)
+  ledcAttachPin(BUZZER_PIN, 2); 
+
+/* Microphone SETUP */
+  pinMode(mk, INPUT);
+
+/* ServoMoter SETUP */
+  servo1.setPeriodHertz(50);      // Standard 50hz servo sg90
+  servo2.setPeriodHertz(50);
+  servo3.setPeriodHertz(50);
+  servo4.setPeriodHertz(50);
+  servo5.setPeriodHertz(50);      
+  servo1.attach(servo1Pin, minUs, maxUs);
+  servo2.attach(servo2Pin, minUs, maxUs);
+  servo3.attach(servo3Pin, minUs, maxUs);
+  servo4.attach(servo4Pin, minUs, maxUs);
+  servo5.attach(servo5Pin, minUs, maxUs);
+
+/* TaskCreate */
+  xTaskCreateUniversal(
+    &SensingPhase,  // 作成するタスク関数
+    "SensingPhase", // 表示用タスク名
+    16384,           // スタックメモリ量
+    NULL,           // 起動パラメータ
+    3,              // 優先度(Min 0 - Max 24)
+    &xSensingPhase, // タスクハンドル
+    APP_CPU_NUM     // 実行するコア
+    );
+
+  xTaskCreateUniversal(
+    &BLE,  // 作成するタスク関数
+    "BLE", // 表示用タスク名
+    16384,           // スタックメモリ量
+    NULL,           // 起動パラメータ
+    3,              // 優先度(Min 0 - Max 24)
+    &xBLE, // タスクハンドル
+    PRO_CPU_NUM     // 実行するコア
+    );
+  
+  xTaskCreateUniversal(
+    &Task1,
+    "Task1",
+    8192,
+    NULL,
+    1,
+    &xTask1,
+    APP_CPU_NUM
+    ); 
+    
+  xTaskCreateUniversal(
+    &Task2,
+    "Task2",
+    8192,
+    NULL,
+    1,
+    &xTask2,
+    APP_CPU_NUM
+    );
+
+  xTaskCreateUniversal(
+    &Task3,
+    "Task3",
+    8192,
+    NULL,
+    1,
+    &xTask3,
+    APP_CPU_NUM
+    );
+
+  xTaskCreateUniversal(
+    &Task4,
+    "Task4",
+    8192,
+    NULL,
+    1,
+    &xTask4,
+    APP_CPU_NUM
+    );
+    
+  xTaskCreateUniversal(
+    &Task5,
+    "Task5",
+    8192,
+    NULL,
+    1,
+    &xTask5,
+    APP_CPU_NUM
+    );
+
+  xTaskCreateUniversal(
+    &Task6,
+    "Task6",
+    8192,
+    NULL,
+    1,
+    &xTask6,
+    APP_CPU_NUM
+    );
+ 
+}
+/*//////////////////////////////*/
+
+void SensingPhase(void *pvParameters) {
+  while (1) { // infinite loop
+  Serial.println("SensingPhase In");
+
+/* BLE Receive sand Send*/
+/*  if (deviceConnected) {
+      Serial.println("deviceConnected:");
+     
+      //値を送信
+      pTxCharacteristic->setValue((uint8_t*)&value, 4);
+      pTxCharacteristic->notify();
+      value++;
+      portENTER_CRITICAL_ISR(&storeDataMux);
+
+      //値を受信
+      if (bleDataIsReceived) {
+        bleDataIsReceived = false;
+        Serial.println("received string:");
+        data1[sizeof(data1)] = '\0';
+//        Serial.println(*data1);  // for debag
+      }
+      
+      portEXIT_CRITICAL_ISR(&storeDataMux);
+      delay(50); // bluetooth stack will go into congestion, if too many packets are sent
+    }*/
+
+/* ACC read */
+  x = analogRead(ACCX_Pin) ; // Ｘ軸
+  y = analogRead(ACCY_Pin) ; // Ｙ軸
+  z = analogRead(ACCZ_Pin) ; // Ｚ軸
+  delay(10);
+  // 電圧[mV]に変換  
+  x_vol = x * 3.30 / 4095 * 1000;  
+  y_vol = y * 3.30 / 4095 * 1000;
+  z_vol = z * 3.30 / 4095 * 1000;
+  // 加速度[G]に変換 Vcc = 3.3V で 660 mv/G
+  x_acc = (x_vol - offset_vol) / 660;
+  y_acc = (y_vol - offset_vol) / 660;
+  z_acc = (z_vol - offset_vol) / 660;
+
+/* Infra-red read */
+  ir_val = 0;
+  ir_val = digitalRead(ir);
+
+/* MicroPhone read */
+  mk_val = 0;
+  mk_val = analogRead(mk);
+  mk_val = mk_val * 3.30 / 4095;
+
+/*///// Set flag Example /////
+     if (Flagを立てたい条件) { 
+        // Set flag
+        flag[**TaskNo.**] = 1; // 1がflagを立てた状態
+        // Taskの再開
+        vTaskResume(**TaskHandle**);
+      } else {
+        // Set flag
+        flag[**TaskNo.**] = 0;　// 0がflagを立てていない状態
+    }
+    delay(500);　// flagを立てる間隔（短くてもたぶんＯＫ）
+/////////////////////////////*/
+
+ // Set flag1
+/*     if (z_acc > 0.75) { 
+        // if分岐入りを把握するため
+//        Serial.println("加速度センサON");
+//        Serial.println(" Z:");
+//        Serial.println(z_acc);
+        // Set flag
+        flag[1] = 1;
+      } else {
+        // if分岐入りを把握するため
+//        Serial.println("加速度センサOFF");
+        //Serial.println(" Y:");
+        //Serial.println(y_acc);
+        // Set flag
+        flag[1] = 0;
+    }
+    delay(10);*/
+ 
+ // Set flag2
+      if (ir_val == 1) {
+        // if分岐入りを把握するため
+        Serial.println("赤外線センサON");
+        // Set flag
+        flag[4] = 1;
+      } else {
+        // if分岐入りを把握するため
+        Serial.println("赤外線センサOFF");
+        // Set flag
+        flag[4] = 0;
+    }  
+    delay(10);
+
+//      if (*data1 ==0x0A) {
+//        // if分岐入りを把握するため
+//        Serial.println("LED_ON");
+//        // Set flag
+////        flag[2] = 1;
+//      delay(50);
+//      } else {
+//        // if分岐入りを把握するため
+//        Serial.println("LED_OFF");
+//        // Set flag
+////        flag[2] = 0;
+//      delay(50);
+//    }  
+    
+   // delay(10);    
+    
+    Serial.println("SensingPhase Out");
+     // Adjust Cycle Time
+  vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+ // Adjust Cycle Time
+//  vTaskDelay(pdMS_TO_TICKS(1000));
+  vTaskDelete(NULL);
+}
+
+void BLE(void *pvParameters) {
+  // infinite loop
+   while (1) {
+    Serial.println("BLEPhase In");
+  if (deviceConnected) {
+      Serial.println("deviceConnected:");
+     
+      //値を送信
+    value = 0x64;
+    pTxCharacteristic->setValue((uint8_t*)&value, 4);
+    pTxCharacteristic->notify();
+//      pTxCharacteristic->setValue((uint8_t*)&value, 4);
+//      pTxCharacteristic->notify();
+//      value++;
+      portENTER_CRITICAL_ISR(&storeDataMux);
+
+      //値を受信
+      if (bleDataIsReceived) {
+        bleDataIsReceived = false;
+        Serial.println("received string:");
+        data1[sizeof(data1)] = '\0';
+        Serial.println(*data1);  // for debag
+        delay(500);
+
+      if (*data1 ==0x0A) {
+        // if分岐入りを把握するため
+        Serial.println("EAT");
+        // Set flag
+        flag[1] = 1;
+      delay(50);
+      }
+      
+      if (*data1 ==0x14) {
+        // if分岐入りを把握するため
+        Serial.println("Stroke");
+        // Set flag
+        flag[2] = 1;
+      delay(50);
+      }
+
+      if (*data1 ==0x1E) {
+        // if分岐入りを把握するため
+        Serial.println("WALKING");
+        // Set flag
+        flag[3] = 1;
+      delay(50);
+      }
+
+      if (*data1 ==0x28) {
+        // if分岐入りを把握するため
+        Serial.println("Ote");
+        // Set flag
+        flag[5] = 1;
+      delay(50);
+      }
+      
+      if (*data1 ==0x32) {
+        // if分岐入りを把握するため
+        Serial.println("Osuwari");
+        // Set flag
+        flag[6] = 1;
+      delay(50);
+      }
+      
+//      else {
+//        // if分岐入りを把握するため
+//        Serial.println("BLE NO SIGNAL");
+//        // Set flag
+//        flag[1] = 0;
+//        flag[2] = 0;
+//        flag[3] = 0;
+//      delay(50);
+//        }  
+        
+      }
+      
+      portEXIT_CRITICAL_ISR(&storeDataMux);
+      delay(50); // bluetooth stack will go into congestion, if too many packets are sent
+    }
+
+    Serial.println("BLEPhase OUT.");    
+    //vTaskResume(xTask2);
+    //vTaskResume(xSensingPhase);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+//vTaskDelay(pdMS_TO_TICKS(5000));
+//delay(500);
+vTaskDelete(NULL);
+}
+
+ /*///// Flag Task Example /////
+void TaskName(void *arg) {
+  uint8_t i = 0;
+  // infinite loop
+  while (1) { 
+    // Sleep by oneself
+    vTaskSuspend(NULL); // vTaskResumeで呼び出されない限り実行されない
+    // flag検知
+    while (flag[**TaskNo.**] == 1) {
+      if (i == 0) {
+　      Serial.println("TaskName is running.");
+
+        //// flag立った時の動作を自由記載 ////
+
+        i++;
+        flag[**TaskNo.**] = 0;
+      }
+      delay(1);
+    }
+    Serial.println("TaskName is stopped.");
+    i = 0;
+  }
+}
+/////////////////////////////*/
+
+void Task1(void *arg) {
+  // infinite loop
+   while (1) {
+    vTaskSuspend(xTask2);
+    vTaskSuspend(xTask3);
+    vTaskSuspend(xTask4);
+    vTaskSuspend(xTask5);
+    vTaskSuspend(xTask6); 
+    vTaskSuspend(xSensingPhase);
+    // flag検知
+    while (flag[1] == 1) {
+        delay(10);
+        Serial.println("Task1 is running.");
+        ledOn(rgb_O);
+        zelda();
+//        Servo_Neck();
+        Servo_Okawari();
+        ledOn(rgb_off);
+        flag[1] = 0;
+      delay(1);
+    }
+    Serial.println("Task1 is loading.");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    vTaskResume(xTask2);
+    vTaskResume(xTask3);
+    vTaskResume(xTask4);
+    vTaskResume(xTask5);
+    vTaskResume(xTask6);
+    vTaskResume(xSensingPhase);
+    }
+Serial.println("Task1 is stopped.");
+vTaskDelete(NULL);
+}
+
+void Task2(void *arg) {
+  // infinite loop
+  while (1) { 
+    delay(10); 
+    Serial.println("Test");
+    vTaskSuspend(xTask1);
+    vTaskSuspend(xTask3);
+    vTaskSuspend(xTask4);
+    vTaskSuspend(xTask5);
+    vTaskSuspend(xTask6); 
+    vTaskSuspend(xSensingPhase);
+    delay(100); 
+    while (flag[2] == 1) {
+//    Serial.println("Task2 is loading.");
+        ledOn(rgb_P);
+        zelda();
+        Servo_Naderu();
+        ledOn(rgb_off);
+        flag[2] = 0;
+      delay(1);
+    }
+//    Serial.println("Task2 is loading.");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    vTaskResume(xTask1);
+    vTaskResume(xTask3);
+    vTaskResume(xTask4);
+    vTaskResume(xTask5);
+    vTaskResume(xTask6);
+    vTaskResume(xSensingPhase);
+}
+Serial.println("Task2 is stopped.");
+vTaskDelete(NULL);
+}
+
+void Task3(void *arg) {
+  // infinite loop
+   while (1) {
+    vTaskSuspend(xTask1);
+    vTaskSuspend(xTask2);
+    vTaskSuspend(xTask4);
+    vTaskSuspend(xTask5);
+    vTaskSuspend(xTask6); 
+    vTaskSuspend(xSensingPhase);
+    // flag検知
+    while (flag[3] == 1) {
+        delay(10);
+        Serial.println("Task2 is running.");
+        ledOn(rgb_Pe);
+        zelda();
+        Servo_Walk();
+        ledOn(rgb_off);
+        flag[3] = 0;
+      delay(1);
+    }
+    Serial.println("Task3 is loading.");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    vTaskResume(xTask1);
+    vTaskResume(xTask2);
+    vTaskResume(xTask4);
+    vTaskResume(xTask5);
+    vTaskResume(xTask6);
+    vTaskResume(xSensingPhase);
+    }
+Serial.println("Task3 is stopped.");
+vTaskDelete(NULL);
+}
+
+void Task4(void *arg) {
+  // infinite loop
+   while (1) {
+    vTaskSuspend(xTask1);
+    vTaskSuspend(xTask2);
+    vTaskSuspend(xTask3);
+    vTaskSuspend(xTask5);
+    vTaskSuspend(xTask6);  
+    vTaskSuspend(xSensingPhase);
+    // flag検知
+    while (flag[4] == 1) {
+        delay(10);
+        Serial.println("Task4 is running.");
+        ledOn(rgb_R);
+        Servo_Fuse();
+//        delay(10);
+        ledOn(rgb_off);
+        flag[4] = 0;
+      delay(1);
+    }
+    Serial.println("Task4 is loading.");
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    vTaskResume(xTask1);
+    vTaskResume(xTask2);
+    vTaskResume(xTask3);
+    vTaskResume(xTask5);
+    vTaskResume(xTask6);
+    vTaskResume(xSensingPhase);
+    }
+Serial.println("Task4 is stopped.");
+vTaskDelete(NULL);
+}
+
+void Task5(void *arg) {
+  // infinite loop
+   while (1) {
+    vTaskSuspend(xTask1);
+    vTaskSuspend(xTask2);
+    vTaskSuspend(xTask3);
+    vTaskSuspend(xTask4);
+    vTaskSuspend(xTask6);  
+    vTaskSuspend(xSensingPhase);
+    // flag検知
+    while (flag[5] == 1) {
+        delay(10);
+        Serial.println("Task5 is running.");
+        Sound_Start();
+        ledOn(rgb_G);
+        Servo_Ote();
+        ledOn(rgb_off);
+        flag[5] = 0;
+      delay(1);
+    }
+    Serial.println("Task5 is loading.");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    vTaskResume(xTask1);
+    vTaskResume(xTask2);
+    vTaskResume(xTask3);
+    vTaskResume(xTask4);
+    vTaskResume(xTask6);
+    vTaskResume(xSensingPhase);
+    }
+Serial.println("Task5 is stopped.");
+vTaskDelete(NULL);
+}
+
+void Task6(void *arg) {
+  // infinite loop
+   while (1) {
+    vTaskSuspend(xTask1);
+    vTaskSuspend(xTask2);
+    vTaskSuspend(xTask3);
+    vTaskSuspend(xTask4);
+    vTaskSuspend(xTask5);  
+    vTaskSuspend(xSensingPhase);
+    // flag検知
+    while (flag[6] == 1) {
+        delay(10);
+        Serial.println("Task6 is running.");
+        Sound_Start();
+        ledOn(rgb_B);
+        Servo_Osuwari();
+        ledOn(rgb_off);
+        flag[6] = 0;
+      delay(1);
+    }
+    Serial.println("Task6 is loading.");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    vTaskResume(xTask1);
+    vTaskResume(xTask2);
+    vTaskResume(xTask3);
+    vTaskResume(xTask4);
+    vTaskResume(xTask5);
+    vTaskResume(xSensingPhase);
+    }
+Serial.println("Task6 is stopped.");
+vTaskDelete(NULL);
+}
+
+void Sound_Start() {
+  ////起動音///////
+    ledcWriteTone(2, 2000); 
+    delay(100);
+    ledcWriteTone(2, 1000);
+    delay(100);    
+    ledcWriteTone(2, 0);    // 音を止める
+  }
+
+void zelda() {
+  ////ゼルダ謎解き音///////
+    ledcWriteTone(2, 3136); // ソ
+    delay(BEAT);
+    ledcWriteTone(2, 2960); // ♯ファ
+    delay(BEAT);
+    ledcWriteTone(2, 2489); // ♯レ
+    delay(BEAT);
+    ledcWriteTone(2, 1760); // ラ
+    delay(BEAT);
+    ledcWriteTone(2, 1661); // ♯ソ
+    delay(BEAT);
+    ledcWriteTone(2, 2637); // ミ
+    delay(BEAT);
+    ledcWriteTone(2, 3322); // ♯ソ
+    delay(BEAT);
+    ledcWriteTone(2, 4186); // ド
+    delay(BEAT);
+    ledcWriteTone(2, 0);    // 音を止める/*/
+  }
+
+void ledOn(int *rgb) {
+  for(int i = 0; i < NUMPIXELS; i++){
+    pixels.setPixelColor(i, pixels.Color(rgb[0],rgb[1],rgb[2])); // RGB設定
+    pixels.show(); // LED点灯
+  }
+}
+
+///サーボモータ動作(お座り)
+void Servo_Osuwari(){
+  for (pos =80 ; pos <= 120; pos += 1) { // sweep from 80 degrees to 120 degrees
+    servo1.write(pos);
+    delay(10);
+    }
+  for (pos = 100; pos >= 60; pos -= 1) { // sweep from 100 degrees to 60 degrees
+    servo4.write(pos);
+    delay(10); 
+  }           
+
+  delay(2000);
+
+  for (pos =120 ; pos >= 80; pos -= 1) { // sweep from 120 degrees to 80 degrees
+    servo1.write(pos);
+    delay(10);
+    }
+
+  for (pos = 60; pos <= 100; pos += 1) { // sweep from 60 degrees to 100 degrees
+    servo4.write(pos);
+    delay(10);             // waits 100ms for the servo to reach the position
+  }
+
+}
+
+///サーボモータ動作(お手)
+void Servo_Ote(){
+  
+  for (pos =80 ; pos <= 170; pos += 2) { // sweep from 80 degrees to 120 degrees
+    servo2.write(pos);
+    delay(10);
+    }   
+
+  delay(1000);
+
+  for (pos =170 ; pos >= 80; pos -= 1) { // sweep from 120 degrees to 80 degrees
+    servo2.write(pos);
+    delay(10);
+    }
+    
+}
+
+///サーボモータ動作(おかわり)
+void Servo_Okawari(){
+
+  //座る
+  for (pos =80 ; pos <= 120; pos += 1) { // sweep from 80 degrees to 120 degrees
+    servo1.write(pos);
+    delay(10);
+    }
+    
+  for (pos = 100; pos >= 60; pos -= 1) { // sweep from 100 degrees to 60 degrees
+    servo4.write(pos);
+    delay(10); 
+    }   
+
+  delay(500);
+
+  //左手あげる
+  for (pos =100 ; pos >= 10; pos -= 2) { // sweep from 120 degrees to 80 degrees
+    servo3.write(pos);
+    delay(10);
+    }
+    
+  delay(1000);
+  
+  //左手おろす
+  for (pos =10 ; pos <= 100; pos += 1) { // sweep from 80 degrees to 120 degrees
+    servo3.write(pos);
+    delay(10);
+    }
+
+  delay(500);
+
+  //立ち上がる
+  for (pos =120 ; pos >= 80; pos -= 1) { // sweep from 120 degrees to 80 degrees
+    servo1.write(pos);
+    delay(10);
+    }
+
+  for (pos = 60; pos <= 100; pos += 1) { // sweep from 60 degrees to 100 degrees
+    servo4.write(pos);
+    delay(10); 
+    }
+    
+}
+
+///サーボモータ動作(伏せ)
+void Servo_Fuse(){
+  for (pos =80 ; pos <= 120; pos += 1) { // sweep from 80 degrees to 120 degrees
+    servo1.write(pos);
+    servo2.write(pos);
+    delay(10);
+    }
+
+  for (pos = 100; pos >= 60; pos -= 1) { // sweep from 100 degrees to 60 degrees
+    servo3.write(pos);
+    servo4.write(pos);
+    delay(10); 
+    }     
+
+  delay(2000);
+
+  for (pos =120 ; pos >= 80; pos -= 1) { // sweep from 120 degrees to 80 degrees
+    servo1.write(pos);
+    servo2.write(pos);
+    delay(10);
+    }
+
+  for (pos = 60; pos <= 100; pos += 1) { // sweep from 60 degrees to 100 degrees
+    servo3.write(pos);
+    servo4.write(pos);
+    delay(10);             
+  }
+}
+
+///サーボモータ動作(伸び)
+void Servo_Nobi(){
+  for (pos =80 ; pos <= 120; pos += 1) { // sweep from 80 degrees to 120 degrees
+    servo2.write(pos);
+    delay(10);
+    }
+
+  for (pos = 100; pos >= 60; pos -= 1) { // sweep from 100 degrees to 60 degrees
+    servo3.write(pos);
+    delay(10); 
+    }     
+
+  delay(2000);
+
+  for (pos =120 ; pos >= 80; pos -= 1) { // sweep from 120 degrees to 80 degrees
+    servo2.write(pos);
+    delay(10);
+    }
+
+  for (pos = 60; pos <= 100; pos += 1) { // sweep from 60 degrees to 100 degrees
+    servo3.write(pos);
+    delay(10);             
+  }
+}
+
+void Servo_Naderu(){
+  int i=0;
+  //伸びる
+  for (pos =80 ; pos <= 120; pos += 1) { // sweep from 80 degrees to 120 degrees
+    servo2.write(pos);
+    delay(10);
+    }
+
+  for (pos = 100; pos >= 60; pos -= 1) { // sweep from 100 degrees to 60 degrees
+    servo3.write(pos);
+    delay(10); 
+    }     
+
+  delay(500);
+  
+  //お尻ふる
+  for (i = 0; i >= 4; i += 1) { 
+
+    for (pos =80 ; pos <= 90; pos += 2) { // sweep from 80 degrees to 120 degrees
+    servo1.write(pos);
+    delay(5);
+    }
+    
+    for (pos = 100; pos <= 110; pos += 2) { // sweep from 100 degrees to 60 degrees
+    servo4.write(pos);
+    delay(5); 
+    }
+
+    for (pos = 90; pos >= 80; pos -= 2) { // sweep from 100 degrees to 60 degrees
+    servo1.write(pos);
+    delay(5);
+    }
+
+    for (pos = 110; pos >= 100; pos -= 2) { // sweep from 100 degrees to 60 degrees
+    servo4.write(pos);
+    delay(5); 
+    }
+   }
+
+  //戻る
+  delay(500);
+
+  for (pos =120 ; pos >= 80; pos -= 1) { // sweep from 120 degrees to 80 degrees
+    servo2.write(pos);
+    delay(10);
+    }
+
+  for (pos = 60; pos <= 100; pos += 1) { // sweep from 60 degrees to 100 degrees
+    servo3.write(pos);
+    delay(10);             
+    }
+}
+
+
+
+///サーボモータ動作(右足)
+void Servo_R_Fuse(){
+  for (pos =80 ; pos <= 120; pos += 1) { // sweep from 80 degrees to 120 degrees
+    servo1.write(pos);
+    servo2.write(pos);
+    delay(10);
+    }
+
+  delay(1000);
+
+  for (pos =120 ; pos >= 80; pos -= 1) { // sweep from 120 degrees to 80 degrees
+    servo1.write(pos);
+    servo2.write(pos);
+    delay(10);
+    }
+
+}
+
+///サーボモータ動作(左足)
+void Servo_L_Fuse(){
+  for (pos = 100; pos >= 60; pos -= 1) { // sweep from 100 degrees to 60 degrees
+    servo3.write(pos);
+    servo4.write(pos);
+    delay(10); 
+  }           
+
+  delay(1000);
+
+  for (pos = 60; pos <= 100; pos += 1) { // sweep from 60 degrees to 100 degrees
+    servo3.write(pos);
+    servo4.write(pos);
+    delay(10);             // waits 100ms for the servo to reach the position
+  }
+  
+}
+
+///サーボモータ動作(首)
+void Servo_Neck(){
+
+   for (pos =80 ; pos <= 120; pos += 1) { // sweep from 80 degrees to 120 degrees
+    servo5.write(pos);
+    delay(10);
+    }   
+
+  delay(1000);
+
+  for (pos =120 ; pos >= 80; pos -= 1) { // sweep from 120 degrees to 80 degrees
+    servo5.write(pos);
+    delay(10);
+   }
+
+}
+
+///サーボモータ動作(歩く)
+void Servo_Walk(){
+  int i=0;
+  //STEP1
+  for(i=1; i<=8; i +=1){
+    
+    for (pos =80 ; pos <= 100; pos += 1) { 
+      servo2.write(pos);
+      delay(10);
+      }
+
+    for (pos =100 ; pos >= 80; pos -= 1) { 
+      servo4.write(pos);
+      delay(10);
+      }
+    
+    for (pos = 80; pos >= 60; pos -= 1) { // sweep from 100 degrees to 60 degrees
+      servo1.write(pos);
+      delay(10); 
+      }
+
+    for (pos = 100; pos <= 120; pos += 1) { // sweep from 60 degrees to 100 degrees
+      servo3.write(pos);
+      delay(10);             
+      }
+
+  //STEP2
+    for (pos =100 ; pos >= 80; pos -= 1) { // sweep from 120 degrees to 80 degrees
+     servo2.write(pos);
+     delay(10);
+     }
+     
+    for (pos =80 ; pos <= 100; pos += 1) { // sweep from 80 degrees to 120 degrees
+     servo4.write(pos);
+     delay(10);
+     }
+
+    for (pos = 60; pos <= 80; pos += 1) { // sweep from 60 degrees to 100 degrees
+     servo1.write(pos);
+     delay(10);             
+     }
+     
+    for (pos = 120; pos >= 100; pos -= 1) { // sweep from 100 degrees to 60 degrees
+     servo3.write(pos);
+     delay(10); 
+     }
+  }
+}
+
+/*
+void Servo_Walk(){
+  int i=0;
+  //STEP1
+    for (pos =80 ; pos <= 100; pos += 2) { 
+      servo2.write(pos);
+      delay(10);
+      }
+
+    for (pos =100 ; pos >= 80; pos -= 2) { 
+      servo4.write(pos);
+      delay(10);
+      }
+    
+    for (pos = 80; pos >= 60; pos -= 2) { // sweep from 100 degrees to 60 degrees
+      servo1.write(pos);
+      delay(10); 
+      }
+
+    for (pos = 100; pos <= 120; pos += 2) { // sweep from 60 degrees to 100 degrees
+      servo3.write(pos);
+      delay(10);             
+      }
+
+  //STEP2
+    for(i=1; i<=4; i +=1){
+    
+      for (pos =100 ; pos >= 60; pos -= 2) { // sweep from 120 degrees to 80 degrees
+       servo2.write(pos);
+       delay(10);
+       }
+       
+      for (pos =80 ; pos <= 120; pos += 2) { // sweep from 80 degrees to 120 degrees
+       servo4.write(pos);
+       delay(10);
+       }
+  
+      for (pos = 60; pos <= 100; pos += 2) { // sweep from 60 degrees to 100 degrees
+       servo1.write(pos);
+       delay(10);             
+       }
+       
+      for (pos = 120; pos >= 80; pos -= 2) { // sweep from 100 degrees to 60 degrees
+       servo3.write(pos);
+       delay(10); 
+       }
+  
+       
+      for (pos =60 ; pos <= 100; pos += 2) { 
+        servo2.write(pos);
+        delay(10);
+        }
+  
+      for (pos =120 ; pos >= 80; pos -= 2) { 
+        servo4.write(pos);
+        delay(10);
+        }
+      
+      for (pos = 100; pos >= 60; pos -= 2) { // sweep from 100 degrees to 60 degrees
+        servo1.write(pos);
+        delay(10); 
+        }
+  
+      for (pos = 80; pos <= 120; pos += 2) { // sweep from 60 degrees to 100 degrees
+        servo3.write(pos);
+        delay(10);             
+        }
+    }
+    
+  //STEP3
+    for (pos =100 ; pos >= 80; pos -= 2) { // sweep from 120 degrees to 80 degrees
+     servo2.write(pos);
+     delay(10);
+     }
+     
+    for (pos =80 ; pos <= 100; pos += 2) { // sweep from 80 degrees to 120 degrees
+     servo4.write(pos);
+     delay(10);
+     }
+
+    for (pos = 60; pos <= 80; pos += 2) { // sweep from 60 degrees to 100 degrees
+     servo1.write(pos);
+     delay(10);             
+     }
+     
+    for (pos = 120; pos >= 100; pos -= 2) { // sweep from 100 degrees to 60 degrees
+     servo3.write(pos);
+     delay(10); 
+     }
+} */
+
+
+
+
+void loop() {
+  delay(500); // Seem to have "Must"
+}
